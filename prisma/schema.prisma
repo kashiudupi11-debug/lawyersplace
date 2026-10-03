@@ -1,0 +1,999 @@
+// LegalDesk — database schema. See DATABASE_DESIGN.md for rationale.
+// Conventions: cuid ids, UTC timestamps, money in integer minor units, soft delete via deletedAt.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────────── Identity & access ─────────────────────────────
+
+model Role {
+  id          String           @id @default(cuid())
+  key         String           @unique // SUPER_ADMIN | LAWYER | STAFF | ACCOUNTANT | CLIENT
+  name        String
+  description String?
+  isSystem    Boolean          @default(true)
+  permissions RolePermission[]
+  users       User[]
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+}
+
+model Permission {
+  id          String           @id @default(cuid())
+  key         String           @unique // e.g. "case:update"
+  description String?
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model User {
+  id                 String    @id @default(cuid())
+  email              String    @unique
+  name               String
+  phone              String?
+  designation        String?
+  avatarUrl          String?
+  passwordHash       String
+  roleId             String
+  role               Role      @relation(fields: [roleId], references: [id])
+  clientId           String?   @unique // set only for CLIENT portal users
+  client             Client?   @relation("PortalUser", fields: [clientId], references: [id])
+  isActive           Boolean   @default(true)
+  failedLoginCount   Int       @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
+  passwordChangedAt  DateTime?
+  isDemo             Boolean   @default(false)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  sessions            Session[]
+  resetTokens         PasswordResetToken[]
+  assignedClients     Client[]          @relation("ClientLawyer")
+  staffClients        Client[]          @relation("ClientStaff")
+  caseAssignments     CaseAssignment[]
+  leadCases           Case[]            @relation("CaseLeadLawyer")
+  hearings            Hearing[]         @relation("HearingLawyer")
+  deadlines           Deadline[]        @relation("DeadlineAssignee")
+  tasksAssigned       Task[]            @relation("TaskAssignee")
+  tasksCreated        Task[]            @relation("TaskCreator")
+  taskComments        TaskComment[]
+  appointments        Appointment[]     @relation("AppointmentLawyer")
+  notes               CaseNote[]
+  communications      Communication[]
+  documentsUploaded   DocumentVersion[]
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+  timelineEvents      TimelineEvent[]
+  aiConversations     AIConversation[]
+  meetings            Meeting[]
+  paymentsRecorded    Payment[]
+  expensesRecorded    Expense[]
+  invoicesCreated     Invoice[]
+
+  @@index([roleId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  tokenHash    String   @unique
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ipAddress    String?
+  userAgent    String?
+  lastActiveAt DateTime @default(now())
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model RateLimit {
+  key         String   @id // e.g. "login:ip:1.2.3.4"
+  count       Int      @default(0)
+  windowStart DateTime @default(now())
+}
+
+model Sequence {
+  name  String // "client" | "case" | "invoice" | "receipt"
+  year  Int
+  value Int    @default(0)
+
+  @@id([name, year])
+}
+
+// ───────────────────────────── Configurable lookups ─────────────────────────────
+
+model PracticeArea {
+  id          String  @id @default(cuid())
+  name        String  @unique
+  slug        String  @unique
+  description String?
+  sortOrder   Int     @default(0)
+  isActive    Boolean @default(true)
+  isPublic    Boolean @default(true)
+}
+
+model CaseType {
+  id        String  @id @default(cuid())
+  name      String  @unique
+  isActive  Boolean @default(true)
+  sortOrder Int     @default(0)
+  cases     Case[]
+}
+
+model CaseStatus {
+  id         String  @id @default(cuid())
+  name       String  @unique
+  color      String  @default("slate") // design-token name, not raw hex
+  isClosed   Boolean @default(false) // counts as closed/disposed for reporting
+  isArchived Boolean @default(false)
+  sortOrder  Int     @default(0)
+  cases      Case[]
+}
+
+model HearingType {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  isActive  Boolean   @default(true)
+  sortOrder Int       @default(0)
+  hearings  Hearing[]
+}
+
+model Court {
+  id           String    @id @default(cuid())
+  name         String
+  courtType    String? // e.g. District Court, High Court
+  jurisdiction String?
+  address      String?
+  city         String?
+  state        String?
+  isActive     Boolean   @default(true)
+  judges       Judge[]
+  cases        Case[]
+  hearings     Hearing[]
+  createdAt    DateTime  @default(now())
+
+  @@index([name])
+}
+
+model Judge {
+  id        String    @id @default(cuid())
+  name      String
+  courtId   String?
+  court     Court?    @relation(fields: [courtId], references: [id])
+  courtroom String?
+  isActive  Boolean   @default(true)
+  cases     Case[]
+  hearings  Hearing[]
+
+  @@index([courtId])
+}
+
+// ───────────────────────────── Clients ─────────────────────────────
+
+enum ClientKind {
+  INDIVIDUAL
+  ORGANIZATION
+}
+
+model Client {
+  id               String     @id @default(cuid())
+  code             String     @unique // CL-2026-00001
+  kind             ClientKind @default(INDIVIDUAL)
+  firstName        String
+  lastName         String?
+  organizationName String?
+  email            String?
+  phone            String?
+  altPhone         String?
+  dateOfBirth      DateTime?  @db.Date
+  occupation       String?
+  addressLine1     String?
+  addressLine2     String?
+  city             String?
+  state            String?
+  postalCode       String?
+  country          String?
+  // Identity information. Stored as type + last 4 only; full numbers are never kept in plain text.
+  idType           String?
+  idNumberLast4    String?
+  referralSource   String?
+  notes            String?
+  assignedLawyerId String?
+  assignedLawyer   User?      @relation("ClientLawyer", fields: [assignedLawyerId], references: [id])
+  assignedStaffId  String?
+  assignedStaff    User?      @relation("ClientStaff", fields: [assignedStaffId], references: [id])
+  archivedAt       DateTime?
+  deletedAt        DateTime?
+  isDemo           Boolean    @default(false)
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  portalUser     User?           @relation("PortalUser")
+  contacts       ClientContact[]
+  cases          Case[]
+  appointments   Appointment[]
+  documents      Document[]
+  communications Communication[]
+  invoices       Invoice[]
+  tasks          Task[]
+  deadlines      Deadline[]
+
+  @@index([phone])
+  @@index([email])
+  @@index([lastName, firstName])
+  @@index([assignedLawyerId])
+  @@index([deletedAt, archivedAt])
+}
+
+model ClientContact {
+  id           String  @id @default(cuid())
+  clientId     String
+  client       Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  name         String
+  relationship String?
+  phone        String?
+  email        String?
+  isEmergency  Boolean @default(false)
+
+  @@index([clientId])
+}
+
+// ───────────────────────────── Cases ─────────────────────────────
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL
+}
+
+model Case {
+  id                  String     @id @default(cuid())
+  code                String     @unique // CASE-2026-0001 (internal)
+  caseNumber          String? // official court number, e.g. O.S. No. 123/2026
+  title               String
+  description         String?
+  clientId            String
+  client              Client     @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  caseTypeId          String?
+  caseType            CaseType?  @relation(fields: [caseTypeId], references: [id])
+  statusId            String
+  status              CaseStatus @relation(fields: [statusId], references: [id])
+  priority            Priority   @default(NORMAL)
+  courtId             String?
+  court               Court?     @relation(fields: [courtId], references: [id])
+  judgeId             String?
+  judge               Judge?     @relation(fields: [judgeId], references: [id])
+  jurisdiction        String?
+  oppositeParty       String?
+  oppositeCounsel     String?
+  clientRole          String? // e.g. Petitioner / Respondent / Plaintiff / Defendant
+  filingDate          DateTime?  @db.Date
+  startDate           DateTime?  @db.Date
+  closedDate          DateTime?  @db.Date
+  leadLawyerId        String?
+  leadLawyer          User?      @relation("CaseLeadLawyer", fields: [leadLawyerId], references: [id])
+  sharedSummary       String? // client-visible status summary (portal)
+  deletedAt           DateTime?
+  isDemo              Boolean    @default(false)
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  assignments    CaseAssignment[]
+  hearings       Hearing[]
+  deadlines      Deadline[]
+  tasks          Task[]
+  notes          CaseNote[]
+  communications Communication[]
+  documents      Document[]
+  invoices       Invoice[]
+  expenses       Expense[]
+  contacts       CaseContact[]
+  timeline       TimelineEvent[]
+  appointments   Appointment[]
+  meetings       Meeting[]
+
+  @@index([caseNumber])
+  @@index([clientId])
+  @@index([statusId])
+  @@index([courtId])
+  @@index([leadLawyerId])
+  @@index([priority, statusId])
+  @@index([deletedAt])
+}
+
+enum CaseAssignmentRole {
+  LEAD
+  ASSOCIATE
+  STAFF
+}
+
+model CaseAssignment {
+  caseId    String
+  userId    String
+  role      CaseAssignmentRole
+  case      Case               @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime           @default(now())
+
+  @@id([caseId, userId])
+  @@index([userId])
+}
+
+model CaseContact {
+  id           String  @id @default(cuid())
+  caseId       String
+  case         Case    @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  name         String
+  role         String // Opposite party, Opposite counsel, Witness, Expert, Other
+  organization String?
+  phone        String?
+  email        String?
+  notes        String?
+
+  @@index([caseId])
+}
+
+enum NoteVisibility {
+  INTERNAL
+  SHARED
+}
+
+model CaseNote {
+  id         String         @id @default(cuid())
+  caseId     String
+  case       Case           @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  authorId   String
+  author     User           @relation(fields: [authorId], references: [id])
+  body       String
+  visibility NoteVisibility @default(INTERNAL)
+  isPinned   Boolean        @default(false)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  @@index([caseId, createdAt])
+}
+
+model TimelineEvent {
+  id          String   @id @default(cuid())
+  caseId      String
+  case        Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  type        String // CASE_CREATED, HEARING_SCHEDULED, DOCUMENT_UPLOADED, STATUS_CHANGED, PAYMENT_RECEIVED, ...
+  title       String
+  description String?
+  occurredAt  DateTime @default(now())
+  actorId     String?
+  actor       User?    @relation(fields: [actorId], references: [id])
+  entityType  String?
+  entityId    String?
+  documentId  String?
+  sharedWithClient Boolean @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([caseId, occurredAt])
+}
+
+// ───────────────────────────── Hearings & deadlines ─────────────────────────────
+
+enum HearingStatus {
+  SCHEDULED
+  COMPLETED
+  ADJOURNED
+  CANCELLED
+  RESCHEDULED
+}
+
+model Hearing {
+  id                String        @id @default(cuid())
+  caseId            String
+  case              Case          @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  courtId           String?
+  court             Court?        @relation(fields: [courtId], references: [id])
+  judgeId           String?
+  judge             Judge?        @relation(fields: [judgeId], references: [id])
+  hearingTypeId     String?
+  hearingType       HearingType?  @relation(fields: [hearingTypeId], references: [id])
+  startsAt          DateTime
+  endsAt            DateTime?
+  courtroom         String?
+  purpose           String?
+  lawyerId          String?
+  lawyer            User?         @relation("HearingLawyer", fields: [lawyerId], references: [id])
+  status            HearingStatus @default(SCHEDULED)
+  notes             String?
+  outcome           String?
+  nextAction        String?
+  previousHearingId String?       @unique
+  previousHearing   Hearing?      @relation("HearingChain", fields: [previousHearingId], references: [id])
+  nextHearing       Hearing?      @relation("HearingChain")
+  completedAt       DateTime?
+  isDemo            Boolean       @default(false)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([startsAt])
+  @@index([caseId])
+  @@index([lawyerId, startsAt])
+  @@index([status])
+}
+
+enum DeadlineStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
+}
+
+// "Upcoming / Due today / Overdue" are derived from dueAt + status at read time, never stored,
+// so they can never go stale.
+model Deadline {
+  id          String         @id @default(cuid())
+  title       String
+  description String?
+  caseId      String?
+  case        Case?          @relation(fields: [caseId], references: [id])
+  clientId    String?
+  client      Client?        @relation(fields: [clientId], references: [id])
+  dueAt       DateTime
+  allDay      Boolean        @default(false)
+  priority    Priority       @default(NORMAL)
+  assigneeId  String?
+  assignee    User?          @relation("DeadlineAssignee", fields: [assigneeId], references: [id])
+  status      DeadlineStatus @default(PENDING)
+  reminderOffsetsMinutes Int[] // e.g. [20160, 10080, 4320, 1440]
+  completedAt DateTime?
+  isDemo      Boolean        @default(false)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([dueAt])
+  @@index([caseId])
+  @@index([assigneeId, dueAt])
+  @@index([status])
+}
+
+// ───────────────────────────── Tasks ─────────────────────────────
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  WAITING
+  COMPLETED
+  CANCELLED
+}
+
+model Task {
+  id             String       @id @default(cuid())
+  title          String
+  description    String?
+  caseId         String?
+  case           Case?        @relation(fields: [caseId], references: [id])
+  clientId       String?
+  client         Client?      @relation(fields: [clientId], references: [id])
+  assigneeId     String?
+  assignee       User?        @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  createdById    String
+  createdBy      User         @relation("TaskCreator", fields: [createdById], references: [id])
+  priority       Priority     @default(NORMAL)
+  status         TaskStatus   @default(TODO)
+  dueAt          DateTime?
+  recurrenceRule String? // "DAILY" | "WEEKLY" | "MONTHLY" (simple, explicit)
+  parentTaskId   String? // previous occurrence of a recurring task
+  completedAt    DateTime?
+  deletedAt      DateTime?
+  isDemo         Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  comments       TaskComment[]
+
+  @@index([assigneeId, status, dueAt])
+  @@index([caseId])
+}
+
+model TaskComment {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id])
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+}
+
+// ───────────────────────────── Appointments, meetings, communication ─────────────────────────────
+
+enum AppointmentStatus {
+  REQUESTED
+  CONFIRMED
+  RESCHEDULED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum AppointmentMode {
+  IN_PERSON
+  ONLINE
+  PHONE
+}
+
+model Appointment {
+  id          String            @id @default(cuid())
+  clientId    String?
+  client      Client?           @relation(fields: [clientId], references: [id])
+  // Public booking requests may come from people who are not yet clients.
+  requesterName  String?
+  requesterEmail String?
+  requesterPhone String?
+  caseId      String?
+  case        Case?             @relation(fields: [caseId], references: [id])
+  lawyerId    String?
+  lawyer      User?             @relation("AppointmentLawyer", fields: [lawyerId], references: [id])
+  startsAt    DateTime
+  durationMin Int               @default(30)
+  purpose     String
+  location    String?
+  mode        AppointmentMode   @default(IN_PERSON)
+  meetingLink String?
+  status      AppointmentStatus @default(REQUESTED)
+  notes       String?
+  deletedAt   DateTime?
+  isDemo      Boolean           @default(false)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([lawyerId, startsAt])
+  @@index([clientId])
+  @@index([startsAt])
+}
+
+model Meeting {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  startsAt    DateTime
+  endsAt      DateTime
+  location    String?
+  caseId      String?
+  case        Case?    @relation(fields: [caseId], references: [id])
+  organizerId String
+  organizer   User     @relation(fields: [organizerId], references: [id])
+  createdAt   DateTime @default(now())
+
+  @@index([startsAt])
+}
+
+enum CommunicationType {
+  PHONE_CALL
+  WHATSAPP
+  EMAIL
+  SMS
+  MEETING
+  LETTER
+  OTHER
+}
+
+enum CommunicationDirection {
+  INBOUND
+  OUTBOUND
+}
+
+model Communication {
+  id           String                 @id @default(cuid())
+  clientId     String
+  client       Client                 @relation(fields: [clientId], references: [id])
+  caseId       String?
+  case         Case?                  @relation(fields: [caseId], references: [id])
+  type         CommunicationType
+  direction    CommunicationDirection @default(OUTBOUND)
+  occurredAt   DateTime
+  subject      String?
+  summary      String
+  followUpAt   DateTime?
+  followUpDone Boolean                @default(false)
+  createdById  String
+  createdBy    User                   @relation(fields: [createdById], references: [id])
+  isDemo       Boolean                @default(false)
+  createdAt    DateTime               @default(now())
+
+  @@index([clientId, occurredAt])
+  @@index([caseId])
+  @@index([followUpAt])
+}
+
+// ───────────────────────────── Documents ─────────────────────────────
+
+enum DocumentType {
+  PETITION
+  APPLICATION
+  AFFIDAVIT
+  AGREEMENT
+  NOTICE
+  ORDER
+  JUDGMENT
+  EVIDENCE
+  IDENTITY_DOCUMENT
+  CORRESPONDENCE
+  INVOICE
+  RECEIPT
+  OTHER
+}
+
+enum DocumentVisibility {
+  INTERNAL
+  SHARED_WITH_CLIENT
+}
+
+enum ScanStatus {
+  PENDING
+  CLEAN
+  INFECTED
+  NOT_SCANNED // no scanner configured; recorded honestly
+}
+
+model Document {
+  id          String             @id @default(cuid())
+  title       String
+  type        DocumentType       @default(OTHER)
+  description String?
+  tags        String[]
+  visibility  DocumentVisibility @default(INTERNAL)
+  clientId    String?
+  client      Client?            @relation(fields: [clientId], references: [id])
+  caseId      String?
+  case        Case?              @relation(fields: [caseId], references: [id])
+  hearingId   String?
+  invoiceId   String?
+  taskId      String?
+  currentVersionId String?       @unique
+  currentVersion   DocumentVersion? @relation("CurrentVersion", fields: [currentVersionId], references: [id])
+  versions    DocumentVersion[]  @relation("DocumentVersions")
+  archivedAt  DateTime?
+  deletedAt   DateTime?
+  isDemo      Boolean            @default(false)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([caseId])
+  @@index([clientId])
+  @@index([type])
+  @@index([deletedAt])
+}
+
+model DocumentVersion {
+  id           String     @id @default(cuid())
+  documentId   String
+  document     Document   @relation("DocumentVersions", fields: [documentId], references: [id], onDelete: Cascade)
+  currentOf    Document?  @relation("CurrentVersion")
+  versionNo    Int
+  label        String? // e.g. "Final"
+  fileName     String
+  mimeType     String
+  sizeBytes    Int
+  storageKey   String     @unique // random key; never derived from file name
+  sha256       String
+  scanStatus   ScanStatus @default(PENDING)
+  uploadedById String
+  uploadedBy   User       @relation(fields: [uploadedById], references: [id])
+  createdAt    DateTime   @default(now())
+
+  @@unique([documentId, versionNo])
+}
+
+// ───────────────────────────── Billing ─────────────────────────────
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PARTIALLY_PAID
+  PAID
+  VOID
+}
+
+enum PaymentMethod {
+  CASH
+  UPI
+  BANK_TRANSFER
+  CARD
+  CHEQUE
+  ONLINE_GATEWAY
+  OTHER
+}
+
+model Invoice {
+  id             String        @id @default(cuid())
+  number         String        @unique // INV-2026-0001
+  clientId       String
+  client         Client        @relation(fields: [clientId], references: [id])
+  caseId         String?
+  case           Case?         @relation(fields: [caseId], references: [id])
+  issueDate      DateTime      @db.Date
+  dueDate        DateTime      @db.Date
+  status         InvoiceStatus @default(DRAFT)
+  notes          String?
+  subtotalMinor  Int           @default(0)
+  discountMinor  Int           @default(0)
+  taxRateBps     Int           @default(0) // basis points; 1800 = 18%
+  taxMinor       Int           @default(0)
+  totalMinor     Int           @default(0)
+  paidMinor      Int           @default(0)
+  currency       String        @default("INR")
+  createdById    String
+  createdBy      User          @relation(fields: [createdById], references: [id])
+  deletedAt      DateTime?
+  isDemo         Boolean       @default(false)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  items          InvoiceItem[]
+  payments       Payment[]
+
+  @@index([status, dueDate])
+  @@index([clientId])
+  @@index([caseId])
+}
+
+model InvoiceItem {
+  id          String  @id @default(cuid())
+  invoiceId   String
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  kind        String  @default("PROFESSIONAL_FEE") // PROFESSIONAL_FEE | COURT_FEE | OTHER_CHARGE
+  description String
+  quantity    Int     @default(1)
+  unitMinor   Int
+  amountMinor Int
+  sortOrder   Int     @default(0)
+
+  @@index([invoiceId])
+}
+
+enum PaymentStatus {
+  PENDING // gateway initiated, awaiting verified webhook
+  CONFIRMED
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  receiptNumber     String?       @unique // RCPT-2026-0001, assigned on confirmation
+  invoiceId         String
+  invoice           Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  amountMinor       Int
+  method            PaymentMethod
+  status            PaymentStatus @default(CONFIRMED)
+  reference         String? // UPI ref / cheque no / bank txn id
+  receivedAt        DateTime
+  gatewayPaymentId  String?       @unique
+  notes             String?
+  recordedById      String?
+  recordedBy        User?         @relation(fields: [recordedById], references: [id])
+  isDemo            Boolean       @default(false)
+  createdAt         DateTime      @default(now())
+
+  @@index([invoiceId])
+  @@index([receivedAt])
+}
+
+model Expense {
+  id           String   @id @default(cuid())
+  caseId       String?
+  case         Case?    @relation(fields: [caseId], references: [id])
+  category     String // Court fee, Travel, Stamp duty, Courier, Other
+  description  String
+  amountMinor  Int
+  incurredOn   DateTime @db.Date
+  billable     Boolean  @default(true)
+  recordedById String
+  recordedBy   User     @relation(fields: [recordedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  @@index([caseId])
+}
+
+// ───────────────────────────── Reminders & notifications ─────────────────────────────
+
+enum ReminderStatus {
+  SCHEDULED
+  DISPATCHED
+  CANCELLED
+}
+
+model Reminder {
+  id            String         @id @default(cuid())
+  entityType    String // HEARING | DEADLINE | TASK | APPOINTMENT
+  entityId      String
+  userId        String? // recipient; null = resolve from entity at dispatch time
+  dueAt         DateTime
+  offsetMinutes Int
+  label         String // "7 days before"
+  status        ReminderStatus @default(SCHEDULED)
+  dispatchedAt  DateTime?
+  createdAt     DateTime       @default(now())
+
+  @@index([status, dueAt])
+  @@index([entityType, entityId])
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  SMS
+  WHATSAPP
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT // accepted by provider
+  DELIVERED // confirmed by provider callback only
+  FAILED
+  NOT_CONFIGURED // channel has no provider credentials; nothing was sent
+}
+
+model Notification {
+  id                String              @id @default(cuid())
+  userId            String
+  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel           NotificationChannel
+  status            NotificationStatus  @default(QUEUED)
+  title             String
+  body              String
+  link              String?
+  reminderId        String?
+  providerMessageId String?
+  error             String?
+  readAt            DateTime?
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+  createdAt         DateTime            @default(now())
+
+  @@index([userId, readAt])
+  @@index([status])
+  @@index([providerMessageId])
+}
+
+// ───────────────────────────── Audit, settings, backups, AI ─────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id])
+  action     String // e.g. "client.update", "document.download"
+  entityType String
+  entityId   String?
+  before     Json?
+  after      Json?
+  metadata   Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+}
+
+model FirmSettings {
+  id                 String   @id @default("firm")
+  firmName           String
+  tagline            String?
+  logoUrl            String?
+  addressLine1       String?
+  addressLine2       String?
+  city               String?
+  state              String?
+  postalCode         String?
+  country            String?
+  phone              String?
+  email              String?
+  website            String?
+  mapEmbedUrl        String?
+  workingHours       Json? // [{ day: "Mon", open: "10:00", close: "18:00" }]
+  timezone           String   @default("Asia/Kolkata")
+  currency           String   @default("INR")
+  locale             String   @default("en-IN")
+  invoicePrefix      String   @default("INV")
+  invoiceTerms       String?
+  taxLabel           String?  @default("GST")
+  defaultTaxRateBps  Int      @default(0)
+  taxRegistrationNo  String?
+  bankDetails        String?
+  hearingReminderOffsets  Int[] @default([10080, 4320, 1440, 120])
+  deadlineReminderOffsets Int[] @default([20160, 10080, 4320, 1440, 0])
+  channelsEnabled    Json? // { email: true, sms: false, whatsapp: false }
+  aiEnabled          Boolean  @default(true)
+  aiModel            String?
+  allLawyersSeeAllCases Boolean @default(false)
+  publicContent      Json? // homepage copy, why-choose-us points, disclaimer text
+  updatedAt          DateTime @updatedAt
+}
+
+enum BackupStatus {
+  SUCCESS
+  FAILED
+  RUNNING
+}
+
+model BackupRecord {
+  id          String       @id @default(cuid())
+  status      BackupStatus
+  startedAt   DateTime
+  finishedAt  DateTime?
+  sizeBytes   BigInt?
+  location    String? // bucket/key reference (no credentials)
+  method      String // "pg_dump" | "provider_pitr"
+  message     String?
+  createdAt   DateTime     @default(now())
+
+  @@index([startedAt])
+}
+
+model AIConversation {
+  id        String      @id @default(cuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String?
+  caseId    String? // optional context
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  messages  AIMessage[]
+
+  @@index([userId, updatedAt])
+}
+
+model AIMessage {
+  id             String         @id @default(cuid())
+  conversationId String
+  conversation   AIConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String // user | assistant | tool
+  content        Json
+  inputTokens    Int?
+  outputTokens   Int?
+  createdAt      DateTime       @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// Public contact-form enquiries (not yet clients).
+model Enquiry {
+  id        String   @id @default(cuid())
+  name      String
+  email     String?
+  phone     String?
+  subject   String?
+  message   String
+  status    String   @default("NEW") // NEW | CONTACTED | CONVERTED | CLOSED
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@index([status, createdAt])
+}
