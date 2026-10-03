@@ -4,7 +4,9 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { login, logout, requestPasswordReset, resetPassword, isTokenShapeValid } from "@/server/services/auth";
 
-export type FormState = { error?: string; success?: string; fieldErrors?: Record<string, string> } | undefined;
+export type FormState =
+  | { error?: string; success?: string; fieldErrors?: Record<string, string>; values?: Record<string, string> }
+  | undefined;
 
 const loginSchema = z.object({
   email: z.email("Enter a valid email address."),
@@ -19,14 +21,16 @@ function safeNext(next: string | undefined, fallback: string) {
 }
 
 export async function loginAction(_: FormState, formData: FormData): Promise<FormState> {
+  // Echo the email back: React resets the form after an action, and the user shouldn't retype it.
+  const values = { email: String(formData.get("email") ?? "").slice(0, 254) };
   const parsed = loginSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) {
     const fieldErrors: Record<string, string> = {};
     for (const issue of parsed.error.issues) fieldErrors[String(issue.path[0])] ??= issue.message;
-    return { fieldErrors };
+    return { fieldErrors, values };
   }
   const result = await login(parsed.data.email, parsed.data.password);
-  if (!result.ok) return { error: result.error };
+  if (!result.ok) return { error: result.error, values };
   const home = result.role === "CLIENT" ? "/portal" : "/dashboard";
   redirect(result.role === "CLIENT" ? home : safeNext(parsed.data.next, home));
 }

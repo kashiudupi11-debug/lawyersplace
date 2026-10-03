@@ -3,7 +3,13 @@
 _Last updated: 2026-10-03_
 
 ## Current phase
-**Phase 3 → 4 gate: database connection required.** Schema, auth code and design-system foundation are written and pass typecheck, lint and build. Migrations, seeding and end-to-end auth testing are blocked until `DATABASE_URL` / `DIRECT_URL` are set in `.env`.
+**Phase 4 complete (auth verified against a real DB).** Next: app shell → Phase 6 public website → Phase 7 dashboard.
+
+### Phase 3/4 verification (2026-10-03)
+- Local Prisma Postgres (`prisma dev`, instance `legaldesk`, port 51214) — no external account; data stays on this PC. `npm run db:start` after a reboot.
+- Migration `init` applied; seed loaded 5 roles, 34 permissions, 5 demo users, 10 statuses, 8 practice areas.
+- Wrong password → generic error ✓ · correct password → session + redirect to `/dashboard` ✓ · cookie HttpOnly (not readable by JS) ✓ · token stored only as SHA-256 hash, 7-day expiry ✓ · audit rows for failed and successful logins ✓ · server-side revocation invalidates the cookie ✓ · 5 failures → 15-minute lockout, even with correct password ✓
+- Bug found and fixed: React 19 resets forms after an action, so a failed login cleared the email. The action now echoes the email back and focuses the password field.
 
 ## Environment (Phase 0)
 | Item | Finding |
@@ -28,15 +34,15 @@ _Last updated: 2026-10-03_
 - [x] Gate checks: `tsc` ✓ · `eslint` ✓ · `next build` ✓ · login page reviewed at desktop and mobile widths, no console errors
 
 ## Current issues / blockers
-1. **No database yet.** Needed for: migrate, seed, login testing, and every phase after this.
-2. Auth flows (login/lockout/reset) are written but **not yet tested against a real DB**.
-3. Email provider not configured. In development, password-reset links are printed to the server console; in production the request is logged with status `NOT_CONFIGURED`.
+1. Production still needs a hosted Postgres (`DATABASE_URL`/`DIRECT_URL`); development uses the local instance.
+2. The lockout message reveals that an account exists (an attacker needs 5 attempts per email to learn this). Accepted trade-off for clear UX; revisit in Phase 22 hardening.
+3. `/dashboard` is not built yet (404 after login). No logout button until the app shell exists.
+4. Password-reset flow not yet exercised end to end (will be covered by integration tests).
+5. Email provider not configured. In development, password-reset links are printed to the server console; in production the request is logged with status `NOT_CONFIGURED`.
 
 ## Next steps
-1. User adds `DATABASE_URL` + `DIRECT_URL` to `.env`.
-2. `npm run db:migrate -- --name init` → `npm run db:seed`.
-3. Test auth end to end (login, wrong password, lockout, reset, logout) and write the first integration tests.
-4. Phase 5 completion → app shell (sidebar, top bar, Ctrl+K placeholder) → Phase 6 public website → Phase 7 dashboard.
+1. Write the first integration tests (auth, reset, scoping).
+2. Phase 5 completion → app shell (sidebar, top bar, Ctrl+K placeholder) → Phase 6 public website → Phase 7 dashboard.
 
 ## Decisions made
 | # | Decision | Reason |
@@ -52,6 +58,7 @@ _Last updated: 2026-10-03_
 | D9 | Notification `DELIVERED` and invoice `PAID` (gateway) only set from verified provider callbacks | Prompt's "no fake success" rule |
 | D10 | Native `<select>` for dropdown fields | Accessible and uses the platform picker on mobile |
 | D11 | npm `allowScripts` approved only for prisma, @prisma/engines, esbuild, unrs-resolver | npm 11 blocks install scripts by default |
+| D12 | Local Prisma Postgres (`prisma dev`) for development | User asked Claude to create the DB; avoids creating third-party accounts and keeps data local |
 
 ## Environment / configuration requirements
 See `.env.example`. Currently required: `DATABASE_URL`, `DIRECT_URL`, `AUTH_SECRET`, `CRON_SECRET`, `BACKUP_REPORT_SECRET`, `DEMO_PASSWORD` (dev). The last four are already generated in your local `.env`.

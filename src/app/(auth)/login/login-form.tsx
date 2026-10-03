@@ -21,8 +21,9 @@ export function LoginForm({ next, reset }: { next?: string; reset?: boolean }) {
           name="email"
           type="email"
           autoComplete="username"
+          defaultValue={state?.values?.email}
           required
-          autoFocus
+          autoFocus={!state?.values?.email}
           aria-invalid={!!fe.email || undefined}
           aria-describedby={describedBy("email", fe.email)}
           className="h-11"
@@ -35,6 +36,7 @@ export function LoginForm({ next, reset }: { next?: string; reset?: boolean }) {
           type="password"
           autoComplete="current-password"
           required
+          autoFocus={!!state?.values?.email}
           aria-invalid={!!fe.password || undefined}
           aria-describedby={describedBy("password", fe.password)}
           className="h-11"

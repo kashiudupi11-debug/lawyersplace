@@ -14,7 +14,9 @@
     "db:seed": "prisma db seed",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "db:start": "prisma dev start legaldesk",
+    "db:stop": "prisma dev stop legaldesk"
   },
   "dependencies": {
     "@date-fns/tz": "^1.5.0",
